@@ -2,28 +2,46 @@
 # coding: utf-8
 
 # In[1]:
-
-
+import random
 import pickle
-from nilearn import plotting
-import nilearn.connectome
-from nilearn import datasets
-from nilearn.input_data import NiftiMasker
-import warnings
-from gcn_windows_dataset import TimeWindowsDataset
-from gcn_model import GCN
-from graph_construction import make_group_graph
-import sys
-import shutil
-import os
-import numpy as np
-import pandas as pd
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch_geometric as tg
-from torch.utils.data import DataLoader
 from IPython.core.interactiveshell import InteractiveShell
+from torch.utils.data import DataLoader
+import torch_geometric as tg
+import torch.nn.functional as F
+import torch.nn as nn
+import torch
+import pandas as pd
+import numpy as np
+import os
+import shutil
+from graph_construction import make_group_graph
+from gcn_windows_dataset import TimeWindowsDataset
+import warnings
+from nilearn.input_data import NiftiMasker
+from nilearn import datasets
+import nilearn.connectome
+from nilearn import plotting
+import matplotlib.pyplot as plt
+import sys
+
+LEARNING_RATE = float(sys.argv[1])
+EPOCHS = int(sys.argv[2])
+BATCH_SIZE = int(sys.argv[3])
+CHEB_CHANNELS = int(sys.argv[4])
+CHEB_K = int(sys.argv[5])
+FC_NEURONS = int(sys.argv[6])
+
+DATA = {
+    "lr": LEARNING_RATE,
+    "epochs": EPOCHS,
+    "batch_size": BATCH_SIZE,
+    "cheb_channels": CHEB_CHANNELS,
+    "cheb_k": CHEB_K,
+    "fc_neurosn": FC_NEURONS,
+
+
+}
+
 InteractiveShell.ast_node_interactivity = "all"
 
 
@@ -155,20 +173,7 @@ label_df.to_csv(out_csv, index=False)
 # In[9]:
 
 
-# split dataset#!/usr/bin/env python
-# coding: utf-8
-
-# In[1]:
-
-
-InteractiveShell.ast_node_interactivity = "all"
-
-
-# In[2]:
-
-
-wdir = os.getcwd()
-sys.path.append(wdir + '/src')
+# split dataset
 
 random_seed = 0
 
@@ -201,6 +206,9 @@ print("valid dataset: {}".format(valid_dataset))
 print("test dataset: {}".format(test_dataset))
 
 
+# In[10]:
+
+
 batch_size = 10
 
 torch.manual_seed(random_seed)
@@ -221,14 +229,84 @@ print(
 # In[11]:
 
 
+class GCN(torch.nn.Module):
+    def __init__(self, edge_index, edge_weight, n_roi, n_timepoints, n_classes, cheb_channels, cheb_k, fc_neurons):
+        super().__init__()
+        self.edge_index = edge_index
+        self.edge_weight = edge_weight
+        self.n_roi = n_roi
+        self.last_out_channels = 4
+
+        #self.batch_norm = m = nn.BatchNorm2d(self.batch_size)
+
+        self.conv1 = tg.nn.ChebConv(
+            in_channels=n_timepoints, out_channels=cheb_channels, K=cheb_k, bias=True
+        )
+        self.conv2 = tg.nn.ChebConv(
+            in_channels=cheb_channels, out_channels=cheb_channels, K=cheb_k, bias=True)
+        self.conv3 = tg.nn.ChebConv(
+            in_channels=cheb_channels, out_channels=cheb_channels, K=cheb_k, bias=True)
+        self.conv4 = tg.nn.ChebConv(
+            in_channels=cheb_channels, out_channels=cheb_channels, K=cheb_k, bias=True)
+        self.conv5 = tg.nn.ChebConv(
+            in_channels=cheb_channels, out_channels=self.last_out_channels, K=cheb_k, bias=True)
+
+        self.fc1 = nn.Linear(self.n_roi * self.last_out_channels, fc_neurons)
+        self.fc2 = nn.Linear(fc_neurons, fc_neurons)
+        self.fc3 = nn.Linear(fc_neurons, n_classes)
+        self.dropout = nn.Dropout(0.2)
+
+    def forward(self, x):
+        #print("Begining of loop")
+        # print(x.shape)
+        #shape = list(x.shape)
+        #x = self.batch_norm(x.view(1,*shape)).view(*shape)
+        x = self.conv1(x, self.edge_index, self.edge_weight)
+        x = F.relu(x)
+        x = self.dropout(x)
+        x = self.conv2(x, self.edge_index, self.edge_weight)
+        x = F.relu(x)
+        x = self.dropout(x)
+        x = self.conv3(x, self.edge_index, self.edge_weight)
+        x = F.relu(x)
+        x = self.dropout(x)
+        x = self.conv4(x, self.edge_index, self.edge_weight)
+        x = F.relu(x)
+        x = self.dropout(x)
+        x = self.conv5(x, self.edge_index, self.edge_weight)
+        x = F.relu(x)
+        x = self.dropout(x)
+        # print(x.shape)
+        #batch_vector = torch.arange(x.size(0), dtype=int)
+        #x = torch.flatten(x, 1)
+        # print(x)
+        #x = tg.nn.global_mean_pool(x, batch_vector)
+        # print(x)
+        x = x.view(-1, self.n_roi * self.last_out_channels)
+        # print(x.shape)
+        x = self.fc1(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        x = self.dropout(x)
+        x = self.fc3(x)
+        # print(x.shape)
+        return x
+
+
 # In[12]:
 
 
 gcn = GCN(graph.edge_index,
           graph.edge_attr,
-          n_roi=X.shape[1],
-          n_timepoints=window_length,
-          n_classes=len(categories))
+          X.shape[1],
+          window_length,
+          len(categories),
+          CHEB_CHANNELS, CHEB_K, FC_NEURONS)
+
+
+# # Model Evaluation
+
+# In[13]:
 
 
 def train_loop(dataloader, model, loss_fn, optimizer):
@@ -269,21 +347,31 @@ def valid_test_loop(dataloader, model, loss_fn):
     return loss, correct
 
 
+# In[14]:
+
+
 avg_acc_train = []
 avg_acc_test = []
 loss_trains = []
 loss_tests = []
 
 
+# In[ ]:
+
+
 loss_fn = torch.nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(
-    gcn.parameters(), lr=0.00003, weight_decay=5e-4, amsgrad=True)
+    gcn.parameters(), lr=LEARNING_RATE, weight_decay=5e-4, amsgrad=True)  # 0.00003
+#optimizer = torch.optim.SGD(gcn.parameters(), lr=0.0008, momentum=0.9)
 
 
-epochs = 10
+# In[ ]:
+
+
+epochs = EPOCHS
 
 for t in range(epochs):
-    print(f"Epoch {t+1}/{epochs}\n-------------------------------")
+    #print(f"Epoch {t+1}/{epochs}\n-------------------------------")
     train_loop(train_generator, gcn, loss_fn, optimizer)
     loss_train, correct_train = valid_test_loop(valid_generator, gcn, loss_fn)
     loss_test, correct_test = valid_test_loop(test_generator, gcn, loss_fn)
@@ -291,21 +379,59 @@ for t in range(epochs):
     avg_acc_test.append(correct_test)
     loss_trains.append(loss_train)
     loss_tests.append(loss_test)
-    print(
-        f"Valid train metrics:\n\t avg_loss: {loss_train:>8f};\t avg_accuracy: {(100*correct_train):>0.1f}%")
-    print(
-        f"Valid test metrics:\n\t avg_loss: {loss_test:>8f};\t avg_accuracy: {(100*correct_test):>0.1f}%")
+#    print(
+#        f"Valid train metrics:\n\t avg_loss: {loss_train:>8f};\t avg_accuracy: {(100*correct_train):>0.1f}%")
+#    print(
+#        f"Valid test metrics:\n\t avg_loss: {loss_test:>8f};\t avg_accuracy: {(100*correct_test):>0.1f}%")
 
-data = {
-    "avg_acc_train": avg_acc_train,
-    "avg_acc_test": avg_acc_test,
-    "loss_trains": loss_trains,
-    "loss_tests": loss_tests,
-    "model": gcn,
-    "loss_fn": loss_fn,
-    "optimizer": optimizer,
-    "epochs": epochs,
-}
+DATA["model"] = gcn
+DATA["optimizer"] = optimizer
+DATA["loss"] = loss_fn
+DATA["avg_acc_train"] = avg_acc_train
+DATA["avg_acc_test"] = avg_acc_test
+DATA["loss_tests"] = loss_tests
+DATA["loss_trains"] = loss_trains
+
+pickle.dump(DATA, open(f"res/data{random.random()}.pic", "wb"))
+
+# In[1]:
 
 
-pickle.dump(data,)
+# print(
+# f"Valid metrics:\n\t avg_loss: {loss_train:>8f};\t avg_accuracy: {(100*avg_acc_test[-1]):>0.1f}%")
+
+
+# In[ ]:
+
+
+#np.asarray(np.arange(epochs)) + 1
+
+
+# In[2]:
+
+
+#fig = plt.figure(figsize=(7, 6))
+#plt.plot(np.asarray(np.arange(len(loss_trains)) + 1).astype("str"), loss_trains)
+#plt.plot(np.asarray(np.arange(len(loss_tests)) + 1).astype("str"), loss_tests)
+# plt.ylabel("Loss")
+# plt.xlabel("Epoch")
+#fig.legend(labels=['Train', 'Test'], bbox_to_anchor=(0, 0, 0.9, 0.5))
+# plt.show()
+
+
+# In[ ]:
+
+
+#fig = plt.figure(figsize=(7, 6))
+#plt.plot(np.asarray(np.arange(len(loss_tests)) + 1).astype("str"), avg_acc_train)
+#plt.plot(np.asarray(np.arange(len(loss_tests)) + 1).astype("str"), avg_acc_test)
+# plt.ylabel("Acc")
+# plt.xlabel("Epoch")
+#fig.legend(labels=['Train', 'Test'], bbox_to_anchor=(0, 0, 0.9, 0.5))
+# plt.show()
+
+
+# In[ ]:
+
+
+# In[ ]:
